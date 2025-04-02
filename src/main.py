@@ -88,6 +88,7 @@ if __name__ == '__main__':
             delete_noaug_cleanL_loader = torch.utils.data.DataLoader(wtrain_noaug_adv_cleanL_set, batch_size=opt.batch_size, shuffle=False, sampler=SubsetSequentialSampler(forget_idx), num_workers=4, pin_memory=True)
         eval_loaders['delete'] = delete_noaug_cleanL_loader
         
+
     # Stage 2: Unlearning
     method = getattr(methods, 'ApplyK')(opt=opt, model=model) if opt.unlearn_method in ['EU', 'CF'] else getattr(methods, opt.unlearn_method)(opt=opt, model=model)
 
@@ -104,5 +105,42 @@ if __name__ == '__main__':
     elif opt.unlearn_method in ['Scrub', 'SSD']:
         method.unlearn(train_loader=retain_loader, test_loader=test_loader, forget_loader=forget_loader, eval_loaders=eval_loaders)
     
+    # Explicitly calculate metrics
+    def calculate_metrics(loader):
+        total_loss, correct, total = 0.0, 0, 0
+        model.eval()
+        with torch.no_grad():
+            for data, target, _ in loader:
+                data, target = data.cuda(), target.cuda()
+                output = model(data)
+                loss = torch.nn.functional.cross_entropy(output, target, reduction='sum').item()
+                total_loss += loss
+                pred = output.argmax(dim=1, keepdim=True)
+                correct += pred.eq(target.view_as(pred)).sum().item()
+                total += target.size(0)
+        avg_loss = total_loss / total
+        accuracy = correct / total
+        return avg_loss, accuracy
+
+    # Calculate forget set metrics
+    method.forget_set_loss, method.forget_set_accuracy = calculate_metrics(retain_loader)
+
+    # Calculate retain set metrics
+    method.retain_set_loss, method.retain_set_accuracy = calculate_metrics(retain_loader)
+
+    # Save results dictionary
+    results_dict = {
+        'SSDdampening': opt.SSDdampening,
+        'SSDselectwt': opt.SSDselectwt,
+        'forget_set_loss': method.forget_set_loss,
+        'forget_set_accuracy': method.forget_set_accuracy,
+        'retain_set_loss': method.retain_set_loss,
+        'retain_set_accuracy': method.retain_set_accuracy
+    }
+    results_filename = f"results_{opt.SSDdampening}_{opt.SSDselectwt}.npy"
+    results_path = opt.save_dir + '/' + results_filename
+    np.save(results_path, results_dict)
+    print(f'Results saved to {results_path}')
+
     method.compute_and_save_results(train_test_loader, test_loader, adversarial_train_loader, adversarial_test_loader)
     print('==> Experiment completed! Exiting..')
